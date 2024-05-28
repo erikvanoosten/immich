@@ -252,6 +252,8 @@ class ApiClient {
           return AssetJobsDto.fromJson(value);
         case 'AssetMediaResponseDto':
           return AssetMediaResponseDto.fromJson(value);
+        case 'AssetMediaSize':
+          return AssetMediaSizeTypeTransformer().decode(value);
         case 'AssetMediaStatus':
           return AssetMediaStatusTypeTransformer().decode(value);
         case 'AssetOrder':
@@ -514,8 +516,6 @@ class ApiClient {
           return TagResponseDto.fromJson(value);
         case 'TagTypeEnum':
           return TagTypeEnumTypeTransformer().decode(value);
-        case 'ThumbnailFormat':
-          return ThumbnailFormatTypeTransformer().decode(value);
         case 'TimeBucketResponseDto':
           return TimeBucketResponseDto.fromJson(value);
         case 'TimeBucketSize':

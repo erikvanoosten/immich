@@ -61,7 +61,7 @@ class ImmichRemoteThumbnailProvider
     // Load a preview to the chunk events
     final preview = getThumbnailUrlForRemoteId(
       key.assetId,
-      type: api.ThumbnailFormat.WEBP,
+      type: api.AssetMediaSize.THUMBNAIL,
     );
 
     yield await ImageLoader.loadImageFromCache(

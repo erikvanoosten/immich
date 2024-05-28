@@ -32,7 +32,7 @@ export function getFiles(files: UploadFiles) {
 }
 
 export enum Route {
-  ASSET = 'asset',
+  ASSET = 'assets',
   USER = 'users',
 }
 

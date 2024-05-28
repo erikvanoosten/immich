@@ -1,4 +1,10 @@
-import { BadRequestException, Inject, Injectable, InternalServerErrorException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+} from '@nestjs/common';
 import { AccessCore, Permission } from 'src/cores/access.core';
 import {
   AssetBulkUploadCheckResponseDto,
@@ -10,12 +16,16 @@ import {
 } from 'src/dtos/asset-media-response.dto';
 import {
   AssetBulkUploadCheckDto,
+  AssetMediaCreateDto,
+  AssetMediaOptionsDto,
   AssetMediaReplaceDto,
+  AssetMediaSize,
   CheckExistingAssetsDto,
   UploadFieldName,
 } from 'src/dtos/asset-media.dto';
+import { AssetFileUploadResponseDto } from 'src/dtos/asset-v1-response.dto';
 import { AuthDto } from 'src/dtos/auth.dto';
-import { ASSET_CHECKSUM_CONSTRAINT, AssetEntity } from 'src/entities/asset.entity';
+import { ASSET_CHECKSUM_CONSTRAINT, AssetEntity, AssetType } from 'src/entities/asset.entity';
 import { IAccessRepository } from 'src/interfaces/access.interface';
 import { IAssetRepository } from 'src/interfaces/asset.interface';
 import { ClientEvent, IEventRepository } from 'src/interfaces/event.interface';
@@ -23,6 +33,7 @@ import { IJobRepository, JobName } from 'src/interfaces/job.interface';
 import { ILoggerRepository } from 'src/interfaces/logger.interface';
 import { IStorageRepository } from 'src/interfaces/storage.interface';
 import { IUserRepository } from 'src/interfaces/user.interface';
+import { CacheControl, ImmichFileResponse, getLivePhotoMotionFilename } from 'src/utils/file';
 import { mimeTypes } from 'src/utils/mime-types';
 import { fromChecksum } from 'src/utils/request';
 import { QueryFailedError } from 'typeorm';
@@ -57,7 +68,119 @@ export class AssetMediaService {
     this.access = AccessCore.create(accessRepository);
   }
 
-  public async replaceAsset(
+  async uploadFile(
+    auth: AuthDto,
+    dto: AssetMediaCreateDto,
+    file: UploadFile,
+    livePhotoFile?: UploadFile,
+    sidecarFile?: UploadFile,
+  ): Promise<AssetFileUploadResponseDto> {
+    if (livePhotoFile) {
+      livePhotoFile = {
+        ...livePhotoFile,
+        originalName: getLivePhotoMotionFilename(file.originalName, livePhotoFile.originalName),
+      };
+    }
+
+    let livePhotoAsset: AssetEntity | null = null;
+
+    try {
+      await this.access.requirePermission(
+        auth,
+        Permission.ASSET_UPLOAD,
+        // do not need an id here, but the interface requires it
+        auth.user.id,
+      );
+
+      this.requireQuota(auth, file.size);
+      if (livePhotoFile) {
+        const livePhotoDto = { ...dto, assetType: AssetType.VIDEO, isVisible: false };
+        livePhotoAsset = await this.create(auth, livePhotoDto, livePhotoFile);
+      }
+
+      const asset = await this.create(auth, dto, file, livePhotoAsset?.id, sidecarFile?.originalPath);
+
+      await this.userRepository.updateUsage(auth.user.id, (livePhotoFile?.size || 0) + file.size);
+
+      return { id: asset.id, duplicate: false };
+    } catch (error: any) {
+      // clean up files
+      await this.jobRepository.queue({
+        name: JobName.DELETE_FILES,
+        data: { files: [file.originalPath, livePhotoFile?.originalPath, sidecarFile?.originalPath] },
+      });
+
+      // handle duplicates with a success response
+      if (error instanceof QueryFailedError && (error as any).constraint === ASSET_CHECKSUM_CONSTRAINT) {
+        const checksums = [file.checksum, livePhotoFile?.checksum].filter((checksum): checksum is Buffer => !!checksum);
+        const [duplicate] = await this.assetRepository.getByChecksums(auth.user.id, checksums);
+        return { id: duplicate.id, duplicate: true };
+      }
+
+      this.logger.error(`Error uploading file ${error}`, error?.stack);
+      throw error;
+    }
+  }
+
+  async downloadOriginal(auth: AuthDto, id: string): Promise<ImmichFileResponse> {
+    await this.access.requirePermission(auth, Permission.ASSET_DOWNLOAD, id);
+
+    const asset = await this.findOrFail(id);
+    if (!asset) {
+      throw new NotFoundException('Asset does not exist');
+    }
+
+    return new ImmichFileResponse({
+      path: asset.originalPath,
+      contentType: mimeTypes.lookup(asset.originalPath),
+      cacheControl: CacheControl.PRIVATE_WITH_CACHE,
+    });
+  }
+
+  async viewThumbnail(auth: AuthDto, id: string, dto: AssetMediaOptionsDto): Promise<ImmichFileResponse> {
+    await this.access.requirePermission(auth, Permission.ASSET_VIEW, id);
+
+    const asset = await this.findOrFail(id);
+    const size = dto.size ?? AssetMediaSize.THUMBNAIL;
+
+    let filepath = asset.previewPath;
+    if (size === AssetMediaSize.THUMBNAIL && asset.thumbnailPath) {
+      filepath = asset.thumbnailPath;
+    }
+
+    if (!filepath) {
+      throw new NotFoundException('Asset media not found');
+    }
+
+    return new ImmichFileResponse({
+      path: filepath,
+      contentType: mimeTypes.lookup(filepath),
+      cacheControl: CacheControl.PRIVATE_WITH_CACHE,
+    });
+  }
+
+  async playbackVideo(auth: AuthDto, id: string): Promise<ImmichFileResponse> {
+    await this.access.requirePermission(auth, Permission.ASSET_VIEW, id);
+
+    const asset = await this.findOrFail(id);
+    if (!asset) {
+      throw new NotFoundException('Asset does not exist');
+    }
+
+    if (asset.type !== AssetType.VIDEO) {
+      throw new BadRequestException('Asset is not a video');
+    }
+
+    const filepath = asset.encodedVideoPath || asset.originalPath;
+
+    return new ImmichFileResponse({
+      path: filepath,
+      contentType: mimeTypes.lookup(filepath),
+      cacheControl: CacheControl.PRIVATE_WITH_CACHE,
+    });
+  }
+
+  async replaceAsset(
     auth: AuthDto,
     id: string,
     dto: AssetMediaReplaceDto,
@@ -85,6 +208,51 @@ export class AssetMediaService {
     } catch (error: any) {
       return await this.handleUploadError(error, auth, file, sidecarFile);
     }
+  }
+
+  async checkExistingAssets(
+    auth: AuthDto,
+    checkExistingAssetsDto: CheckExistingAssetsDto,
+  ): Promise<CheckExistingAssetsResponseDto> {
+    const assets = await this.assetRepository.getByDeviceIds(
+      auth.user.id,
+      checkExistingAssetsDto.deviceId,
+      checkExistingAssetsDto.deviceAssetIds,
+    );
+    return {
+      existingIds: assets.map((asset) => asset.id),
+    };
+  }
+
+  async bulkUploadCheck(auth: AuthDto, dto: AssetBulkUploadCheckDto): Promise<AssetBulkUploadCheckResponseDto> {
+    const checksums: Buffer[] = dto.assets.map((asset) => fromChecksum(asset.checksum));
+    const results = await this.assetRepository.getByChecksums(auth.user.id, checksums);
+    const checksumMap: Record<string, string> = {};
+
+    for (const { id, checksum } of results) {
+      checksumMap[checksum.toString('hex')] = id;
+    }
+
+    return {
+      results: dto.assets.map(({ id, checksum }) => {
+        const duplicate = checksumMap[fromChecksum(checksum).toString('hex')];
+        if (duplicate) {
+          return {
+            id,
+            assetId: duplicate,
+            action: AssetUploadAction.REJECT,
+            reason: AssetRejectReason.DUPLICATE,
+          };
+        }
+
+        // TODO mime-check
+
+        return {
+          id,
+          action: AssetUploadAction.ACCEPT,
+        };
+      }),
+    };
   }
 
   private async handleUploadError(
@@ -181,54 +349,60 @@ export class AssetMediaService {
     return created;
   }
 
+  private async create(
+    auth: AuthDto,
+    dto: AssetMediaCreateDto,
+    file: UploadFile,
+    livePhotoAssetId?: string,
+    sidecarPath?: string,
+  ): Promise<AssetEntity> {
+    const asset = await this.assetRepository.create({
+      ownerId: auth.user.id,
+      libraryId: null,
+
+      checksum: file.checksum,
+      originalPath: file.originalPath,
+
+      deviceAssetId: dto.deviceAssetId,
+      deviceId: dto.deviceId,
+
+      fileCreatedAt: dto.fileCreatedAt,
+      fileModifiedAt: dto.fileModifiedAt,
+      localDateTime: dto.fileCreatedAt,
+
+      type: mimeTypes.assetType(file.originalPath),
+      isFavorite: dto.isFavorite,
+      isArchived: dto.isArchived ?? false,
+      duration: dto.duration || null,
+      isVisible: dto.isVisible ?? true,
+      livePhotoVideo: livePhotoAssetId === null ? null : ({ id: livePhotoAssetId } as AssetEntity),
+      originalFileName: file.originalName,
+      sidecarPath: sidecarPath || null,
+      isOffline: dto.isOffline ?? false,
+    });
+
+    if (sidecarPath) {
+      await this.storageRepository.utimes(sidecarPath, new Date(), new Date(dto.fileModifiedAt));
+    }
+    await this.storageRepository.utimes(file.originalPath, new Date(), new Date(dto.fileModifiedAt));
+    await this.assetRepository.upsertExif({ assetId: asset.id, fileSizeInByte: file.size });
+    await this.jobRepository.queue({ name: JobName.METADATA_EXTRACTION, data: { id: asset.id, source: 'upload' } });
+
+    return asset;
+  }
+
   private requireQuota(auth: AuthDto, size: number) {
     if (auth.user.quotaSizeInBytes && auth.user.quotaSizeInBytes < auth.user.quotaUsageInBytes + size) {
       throw new BadRequestException('Quota has been exceeded!');
     }
   }
 
-  async checkExistingAssets(
-    auth: AuthDto,
-    checkExistingAssetsDto: CheckExistingAssetsDto,
-  ): Promise<CheckExistingAssetsResponseDto> {
-    const assets = await this.assetRepository.getByDeviceIds(
-      auth.user.id,
-      checkExistingAssetsDto.deviceId,
-      checkExistingAssetsDto.deviceAssetIds,
-    );
-    return {
-      existingIds: assets.map((asset) => asset.id),
-    };
-  }
-
-  async bulkUploadCheck(auth: AuthDto, dto: AssetBulkUploadCheckDto): Promise<AssetBulkUploadCheckResponseDto> {
-    const checksums: Buffer[] = dto.assets.map((asset) => fromChecksum(asset.checksum));
-    const results = await this.assetRepository.getByChecksums(auth.user.id, checksums);
-    const checksumMap: Record<string, string> = {};
-
-    for (const { id, checksum } of results) {
-      checksumMap[checksum.toString('hex')] = id;
+  private async findOrFail(id: string): Promise<AssetEntity> {
+    const asset = await this.assetRepository.getById(id);
+    if (!asset) {
+      throw new NotFoundException('Asset not found');
     }
 
-    return {
-      results: dto.assets.map(({ id, checksum }) => {
-        const duplicate = checksumMap[fromChecksum(checksum).toString('hex')];
-        if (duplicate) {
-          return {
-            id,
-            assetId: duplicate,
-            action: AssetUploadAction.REJECT,
-            reason: AssetRejectReason.DUPLICATE,
-          };
-        }
-
-        // TODO mime-check
-
-        return {
-          id,
-          action: AssetUploadAction.ACCEPT,
-        };
-      }),
-    };
+    return asset;
   }
 }

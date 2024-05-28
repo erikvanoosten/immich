@@ -1,19 +1,22 @@
 import {
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Inject,
+  Next,
   Param,
   ParseFilePipe,
   Post,
   Put,
+  Query,
   Res,
   UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
-import { ApiConsumes, ApiTags } from '@nestjs/swagger';
-import { Response } from 'express';
+import { ApiBody, ApiConsumes, ApiHeader, ApiTags } from '@nestjs/swagger';
+import { NextFunction, Response } from 'express';
 import { EndpointLifecycle } from 'src/decorators';
 import {
   AssetBulkUploadCheckResponseDto,
@@ -23,15 +26,26 @@ import {
 } from 'src/dtos/asset-media-response.dto';
 import {
   AssetBulkUploadCheckDto,
+  AssetMediaCreateDto,
+  AssetMediaOptionsDto,
   AssetMediaReplaceDto,
   CheckExistingAssetsDto,
   UploadFieldName,
 } from 'src/dtos/asset-media.dto';
-import { AuthDto } from 'src/dtos/auth.dto';
+import { AssetFileUploadResponseDto } from 'src/dtos/asset-v1-response.dto';
+import { AuthDto, ImmichHeader } from 'src/dtos/auth.dto';
 import { ILoggerRepository } from 'src/interfaces/logger.interface';
-import { Auth, Authenticated } from 'src/middleware/auth.guard';
-import { FileUploadInterceptor, Route, UploadFiles, getFiles } from 'src/middleware/file-upload.interceptor';
+import { AssetUploadInterceptor } from 'src/middleware/asset-upload.interceptor';
+import { Auth, Authenticated, FileResponse } from 'src/middleware/auth.guard';
+import {
+  FileUploadInterceptor,
+  Route,
+  UploadFiles,
+  getFiles,
+  mapToUploadFile,
+} from 'src/middleware/file-upload.interceptor';
 import { AssetMediaService } from 'src/services/asset-media.service';
+import { sendFile } from 'src/utils/file';
 import { FileNotEmptyValidator, UUIDParamDto } from 'src/validation';
 
 @ApiTags('Asset')
@@ -42,10 +56,59 @@ export class AssetMediaController {
     private service: AssetMediaService,
   ) {}
 
+  @Post()
+  @UseInterceptors(AssetUploadInterceptor, FileUploadInterceptor)
+  @ApiConsumes('multipart/form-data')
+  @ApiHeader({
+    name: ImmichHeader.CHECKSUM,
+    description: 'sha1 checksum that can be used for duplicate detection before the file is uploaded',
+    required: false,
+  })
+  @ApiBody({ description: 'Asset Upload Information', type: AssetMediaCreateDto })
+  @Authenticated({ sharedLink: true })
+  async uploadFile(
+    @Auth() auth: AuthDto,
+    @UploadedFiles(new ParseFilePipe({ validators: [new FileNotEmptyValidator(['assetData'])] })) files: UploadFiles,
+    @Body() dto: AssetMediaCreateDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<AssetFileUploadResponseDto> {
+    const file = mapToUploadFile(files.assetData[0]);
+    const _livePhotoFile = files.livePhotoData?.[0];
+    const _sidecarFile = files.sidecarData?.[0];
+    let livePhotoFile;
+    if (_livePhotoFile) {
+      livePhotoFile = mapToUploadFile(_livePhotoFile);
+    }
+
+    let sidecarFile;
+    if (_sidecarFile) {
+      sidecarFile = mapToUploadFile(_sidecarFile);
+    }
+
+    const responseDto = await this.service.uploadFile(auth, dto, file, livePhotoFile, sidecarFile);
+    if (responseDto.duplicate) {
+      res.status(HttpStatus.OK);
+    }
+
+    return responseDto;
+  }
+
+  @Get(':id/original')
+  @FileResponse()
+  @Authenticated({ sharedLink: true })
+  async downloadAsset(
+    @Auth() auth: AuthDto,
+    @Param() { id }: UUIDParamDto,
+    @Res() res: Response,
+    @Next() next: NextFunction,
+  ) {
+    await sendFile(res, next, () => this.service.downloadOriginal(auth, id), this.logger);
+  }
+
   /**
    *  Replace the asset with new file, without changing its id
    */
-  @Put(':id/file')
+  @Put(':id/original')
   @UseInterceptors(FileUploadInterceptor)
   @ApiConsumes('multipart/form-data')
   @Authenticated({ sharedLink: true })
@@ -64,6 +127,31 @@ export class AssetMediaController {
       res.status(HttpStatus.OK);
     }
     return responseDto;
+  }
+
+  @Get(':id/thumbnail')
+  @FileResponse()
+  @Authenticated({ sharedLink: true })
+  async viewAsset(
+    @Auth() auth: AuthDto,
+    @Param() { id }: UUIDParamDto,
+    @Query() dto: AssetMediaOptionsDto,
+    @Res() res: Response,
+    @Next() next: NextFunction,
+  ) {
+    await sendFile(res, next, () => this.service.viewThumbnail(auth, id, dto), this.logger);
+  }
+
+  @Get(':id/video/playback')
+  @FileResponse()
+  @Authenticated({ sharedLink: true })
+  async playAssetVideo(
+    @Auth() auth: AuthDto,
+    @Param() { id }: UUIDParamDto,
+    @Res() res: Response,
+    @Next() next: NextFunction,
+  ) {
+    await sendFile(res, next, () => this.service.playbackVideo(auth, id), this.logger);
   }
 
   /**

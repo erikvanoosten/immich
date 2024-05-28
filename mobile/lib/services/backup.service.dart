@@ -298,7 +298,7 @@ class BackupService {
 
           var req = MultipartRequest(
             'POST',
-            Uri.parse('$savedEndpoint/asset/upload'),
+            Uri.parse('$savedEndpoint/assets'),
             onProgress: ((bytes, totalBytes) =>
                 uploadProgressCb(bytes, totalBytes)),
           );

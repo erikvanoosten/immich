@@ -7,6 +7,7 @@ import {
   Action,
   AssetMediaStatus,
   checkBulkUpload,
+  getAssetOriginalPath,
   getBaseUrl,
   getSupportedMediaTypes,
   type AssetFileUploadResponseDto,
@@ -129,7 +130,7 @@ async function fileUploader(assetFile: File, albumId?: string, replaceAssetId?: 
       uploadAssetsStore.updateAsset(deviceAssetId, { message: 'Uploading...' });
       if (replaceAssetId) {
         const response = await uploadRequest<AssetMediaResponseDto>({
-          url: getBaseUrl() + '/asset/' + replaceAssetId + '/file' + (key ? `?key=${key}` : ''),
+          url: getBaseUrl() + getAssetOriginalPath(replaceAssetId) + (key ? `?key=${key}` : ''),
           method: 'PUT',
           data: formData,
           onUploadProgress: (event) => uploadAssetsStore.updateProgress(deviceAssetId, event.loaded, event.total),
@@ -137,7 +138,7 @@ async function fileUploader(assetFile: File, albumId?: string, replaceAssetId?: 
         ({ status, id } = response.data);
       } else {
         const response = await uploadRequest<AssetFileUploadResponseDto>({
-          url: getBaseUrl() + '/asset/upload' + (key ? `?key=${key}` : ''),
+          url: getBaseUrl() + '/assets' + (key ? `?key=${key}` : ''),
           data: formData,
           onUploadProgress: (event) => uploadAssetsStore.updateProgress(deviceAssetId, event.loaded, event.total),
         });

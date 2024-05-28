@@ -225,7 +225,7 @@ const uploadFile = async (input: string, stats: Stats): Promise<AssetFileUploadR
     formData.append('sidecarData', sidecarData);
   }
 
-  const response = await fetch(`${baseUrl}/asset/upload`, {
+  const response = await fetch(`${baseUrl}/assets`, {
     method: 'post',
     redirect: 'error',
     headers: headers as Record<string, string>,

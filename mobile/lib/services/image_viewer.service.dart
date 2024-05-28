@@ -26,12 +26,12 @@ class ImageViewerService {
       // Download LivePhotos image and motion part
       if (asset.isImage && asset.livePhotoVideoId != null && Platform.isIOS) {
         var imageResponse =
-            await _apiService.downloadApi.downloadFileWithHttpInfo(
+            await _apiService.assetApi.downloadAssetWithHttpInfo(
           asset.remoteId!,
         );
 
         var motionReponse =
-            await _apiService.downloadApi.downloadFileWithHttpInfo(
+            await _apiService.assetApi.downloadAssetWithHttpInfo(
           asset.livePhotoVideoId!,
         );
 
